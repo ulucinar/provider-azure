@@ -17,8 +17,10 @@ limitations under the License.
 package redis
 
 import (
+	"context"
 	"reflect"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/redis/armredis"
 	"github.com/Azure/azure-sdk-for-go/services/redis/mgmt/2018-03-01/redis"
 
 	"github.com/crossplane/provider-azure/apis/cache/v1beta1"
@@ -27,28 +29,37 @@ import (
 
 // Resource states
 const (
-	ProvisioningStateCreating  = string(redis.Creating)
-	ProvisioningStateDeleting  = string(redis.Deleting)
-	ProvisioningStateFailed    = string(redis.Failed)
-	ProvisioningStateSucceeded = string(redis.Succeeded)
+	ProvisioningStateCreating  = string(armredis.ProvisioningStateCreating)
+	ProvisioningStateDeleting  = string(armredis.ProvisioningStateDeleting)
+	ProvisioningStateFailed    = string(armredis.ProvisioningStateFailed)
+	ProvisioningStateSucceeded = string(armredis.ProvisioningStateSucceeded)
 )
+
+type ClientAPI interface {
+	BeginCreate(ctx context.Context, resourceGroupName string, name string, parameters armredis.CreateParameters, options *armredis.ClientBeginCreateOptions) (armredis.ClientCreatePollerResponse, error)
+	BeginDelete(ctx context.Context, resourceGroupName string, name string, options *armredis.ClientBeginDeleteOptions) (armredis.ClientDeletePollerResponse, error)
+	Get(ctx context.Context, resourceGroupName string, name string, options *armredis.ClientGetOptions) (armredis.ClientGetResponse, error)
+	ListKeys(ctx context.Context, resourceGroupName string, name string, options *armredis.ClientListKeysOptions) (armredis.ClientListKeysResponse, error)
+	Update(ctx context.Context, resourceGroupName string, name string, parameters armredis.UpdateParameters, options *armredis.ClientUpdateOptions) (armredis.ClientUpdateResponse, error)
+}
 
 // NewCreateParameters returns Redis resource creation parameters suitable for
 // use with the Azure API.
-func NewCreateParameters(cr *v1beta1.Redis) redis.CreateParameters {
-	return redis.CreateParameters{
+func NewCreateParameters(cr *v1beta1.Redis) armredis.CreateParameters {
+
+	return armredis.CreateParameters{
 		Location: azure.ToStringPtr(cr.Spec.ForProvider.Location),
-		Zones:    azure.ToStringArrayPtr(cr.Spec.ForProvider.Zones),
+		Zones:    azure.ToArrayOfStringPointers(cr.Spec.ForProvider.Zones),
 		Tags:     azure.ToStringPtrMap(cr.Spec.ForProvider.Tags),
-		CreateProperties: &redis.CreateProperties{
-			Sku:                NewSKU(cr.Spec.ForProvider.SKU),
+		Properties: &armredis.CreateProperties{
+			SKU:                NewSKU(cr.Spec.ForProvider.SKU),
 			SubnetID:           cr.Spec.ForProvider.SubnetID,
 			StaticIP:           cr.Spec.ForProvider.StaticIP,
-			EnableNonSslPort:   cr.Spec.ForProvider.EnableNonSSLPort,
-			RedisConfiguration: azure.ToStringPtrMap(cr.Spec.ForProvider.RedisConfiguration),
+			EnableNonSSLPort:   cr.Spec.ForProvider.EnableNonSSLPort,
+			RedisConfiguration: toCommonPropertiesRedisConfiguration(cr.Spec.ForProvider.RedisConfiguration),
 			TenantSettings:     azure.ToStringPtrMap(cr.Spec.ForProvider.TenantSettings),
 			ShardCount:         azure.ToInt32(cr.Spec.ForProvider.ShardCount),
-			MinimumTLSVersion:  redis.TLSVersion(azure.ToString(cr.Spec.ForProvider.MinimumTLSVersion)),
+			MinimumTLSVersion:  toTLSVersion(cr.Spec.ForProvider.MinimumTLSVersion),
 		},
 	}
 }
@@ -62,16 +73,16 @@ func NewCreateParameters(cr *v1beta1.Redis) redis.CreateParameters {
 // statements which increase the cyclomatic complexity even though it's actually
 // easier to maintain all this in one function.
 // nolint:gocyclo
-func NewUpdateParameters(spec v1beta1.RedisParameters, state redis.ResourceType) redis.UpdateParameters {
-	patch := redis.UpdateParameters{
+func NewUpdateParameters(spec v1beta1.RedisParameters, state armredis.ResourceInfo) armredis.UpdateParameters {
+	patch := armredis.UpdateParameters{
 		Tags: azure.ToStringPtrMap(spec.Tags),
-		UpdateProperties: &redis.UpdateProperties{
-			Sku:                NewSKU(spec.SKU),
-			RedisConfiguration: azure.ToStringPtrMap(spec.RedisConfiguration),
-			EnableNonSslPort:   spec.EnableNonSSLPort,
+		Properties: &armredis.UpdateProperties{
+			SKU:                NewSKU(spec.SKU),
+			RedisConfiguration: toCommonPropertiesRedisConfiguration(spec.RedisConfiguration),
+			EnableNonSSLPort:   spec.EnableNonSSLPort,
 			ShardCount:         azure.ToInt32(spec.ShardCount),
 			TenantSettings:     azure.ToStringPtrMap(spec.TenantSettings),
-			MinimumTLSVersion:  redis.TLSVersion(azure.ToString(spec.MinimumTLSVersion)),
+			MinimumTLSVersion:  toTLSVersion(spec.MinimumTLSVersion),
 		},
 	}
 	// NOTE(muvaf): One could possibly generate UpdateParameters object from
@@ -89,42 +100,39 @@ func NewUpdateParameters(spec v1beta1.RedisParameters, state redis.ResourceType)
 	if state.Properties == nil {
 		return patch
 	}
-	if reflect.DeepEqual(patch.Sku, state.Properties.Sku) {
-		patch.Sku = nil
+	if reflect.DeepEqual(patch.Properties.SKU, state.Properties.SKU) {
+		patch.Properties.SKU = nil
 	}
-	for k, v := range state.RedisConfiguration {
-		if reflect.DeepEqual(patch.RedisConfiguration[k], v) {
-			delete(patch.RedisConfiguration, k)
+	if reflect.DeepEqual(patch.Properties.RedisConfiguration, state.Properties.RedisConfiguration) {
+		patch.Properties.RedisConfiguration = nil
+	}
+	if reflect.DeepEqual(patch.Properties.EnableNonSSLPort, state.Properties.EnableNonSSLPort) {
+		patch.Properties.EnableNonSSLPort = nil
+	}
+	if reflect.DeepEqual(patch.Properties.ShardCount, state.Properties.ShardCount) {
+		patch.Properties.ShardCount = nil
+	}
+	for k, v := range state.Properties.TenantSettings {
+		if reflect.DeepEqual(patch.Properties.TenantSettings[k], v) {
+			delete(patch.Properties.TenantSettings, k)
 		}
 	}
-	if len(patch.RedisConfiguration) == 0 {
-		patch.RedisConfiguration = nil
+	if len(patch.Properties.TenantSettings) == 0 {
+		patch.Properties.TenantSettings = nil
 	}
-	if reflect.DeepEqual(patch.EnableNonSslPort, state.EnableNonSslPort) {
-		patch.EnableNonSslPort = nil
-	}
-	if reflect.DeepEqual(patch.ShardCount, state.ShardCount) {
-		patch.ShardCount = nil
-	}
-	for k, v := range state.TenantSettings {
-		if reflect.DeepEqual(patch.TenantSettings[k], v) {
-			delete(patch.TenantSettings, k)
-		}
-	}
-	if len(patch.TenantSettings) == 0 {
-		patch.TenantSettings = nil
-	}
-	if reflect.DeepEqual(patch.MinimumTLSVersion, state.MinimumTLSVersion) {
-		patch.MinimumTLSVersion = ""
+	if reflect.DeepEqual(patch.Properties.MinimumTLSVersion, state.Properties.MinimumTLSVersion) {
+		patch.Properties.MinimumTLSVersion = nil
 	}
 	return patch
 }
 
 // NewSKU returns a Redis resource SKU suitable for use with the Azure API.
-func NewSKU(s v1beta1.SKU) *redis.Sku {
-	return &redis.Sku{
-		Name:     redis.SkuName(s.Name),
-		Family:   redis.SkuFamily(s.Family),
+func NewSKU(s v1beta1.SKU) *armredis.SKU {
+	n := armredis.SKUName(s.Name)
+	f := armredis.SKUFamily(s.Family)
+	return &armredis.SKU{
+		Name:     &n,
+		Family:   &f,
 		Capacity: azure.ToInt32Ptr(s.Capacity, azure.FieldRequired),
 	}
 }
@@ -132,7 +140,7 @@ func NewSKU(s v1beta1.SKU) *redis.Sku {
 // NeedsUpdate returns true if the supplied spec object differs from the
 // supplied Azure resource. It considers only fields that can be modified in
 // place without deleting and recreating the instance.
-func NeedsUpdate(spec v1beta1.RedisParameters, az redis.ResourceType) bool {
+func NeedsUpdate(spec v1beta1.RedisParameters, az armredis.ResourceInfo) bool {
 	if az.Properties == nil {
 		return true
 	}
@@ -143,7 +151,7 @@ func NeedsUpdate(spec v1beta1.RedisParameters, az redis.ResourceType) bool {
 
 // GenerateObservation produces a RedisObservation object from the redis.ResourceType
 // received from Azure.
-func GenerateObservation(az redis.ResourceType) v1beta1.RedisObservation {
+func GenerateObservation(az armredis.ResourceInfo) v1beta1.RedisObservation {
 	o := v1beta1.RedisObservation{
 		ID:   azure.ToString(az.ID),
 		Name: azure.ToString(az.Name),
@@ -152,13 +160,15 @@ func GenerateObservation(az redis.ResourceType) v1beta1.RedisObservation {
 		return o
 	}
 	o.RedisVersion = azure.ToString(az.Properties.RedisVersion)
-	o.ProvisioningState = string(az.Properties.ProvisioningState)
+	if az.Properties.ProvisioningState != nil {
+		o.ProvisioningState = string(*az.Properties.ProvisioningState)
+	}
 	o.HostName = azure.ToString(az.Properties.HostName)
 	o.Port = azure.ToInt(az.Properties.Port)
-	o.SSLPort = azure.ToInt(az.Properties.SslPort)
-	if az.LinkedServers != nil {
-		o.LinkedServers = make([]string, len(*az.Properties.LinkedServers))
-		for i, val := range *az.Properties.LinkedServers {
+	o.SSLPort = azure.ToInt(az.Properties.SSLPort)
+	if az.Properties.LinkedServers != nil {
+		o.LinkedServers = make([]string, len(az.Properties.LinkedServers))
+		for i, val := range az.Properties.LinkedServers {
 			o.LinkedServers[i] = azure.ToString(val.ID)
 		}
 	}
@@ -167,18 +177,114 @@ func GenerateObservation(az redis.ResourceType) v1beta1.RedisObservation {
 
 // LateInitialize fills the spec values that user did not fill with their
 // corresponding value in the Azure, if there is any.
-func LateInitialize(spec *v1beta1.RedisParameters, az redis.ResourceType) {
-	spec.Zones = azure.LateInitializeStringValArrFromArrPtr(spec.Zones, az.Zones)
+func LateInitialize(spec *v1beta1.RedisParameters, az armredis.ResourceInfo) {
+	spec.Zones = azure.LateInitializeStringValArrFromPtrArr(spec.Zones, az.Zones)
 	spec.Tags = azure.LateInitializeStringMap(spec.Tags, az.Tags)
 	if az.Properties == nil {
 		return
 	}
 	spec.SubnetID = azure.LateInitializeStringPtrFromPtr(spec.SubnetID, az.Properties.SubnetID)
 	spec.StaticIP = azure.LateInitializeStringPtrFromPtr(spec.StaticIP, az.Properties.StaticIP)
-	spec.RedisConfiguration = azure.LateInitializeStringMap(spec.RedisConfiguration, az.Properties.RedisConfiguration)
-	spec.EnableNonSSLPort = azure.LateInitializeBoolPtrFromPtr(spec.EnableNonSSLPort, az.Properties.EnableNonSslPort)
+	spec.RedisConfiguration = lateInitializeFromCommonPropertiesRedisConfiguration(spec.RedisConfiguration, az.Properties.RedisConfiguration)
+	spec.EnableNonSSLPort = azure.LateInitializeBoolPtrFromPtr(spec.EnableNonSSLPort, az.Properties.EnableNonSSLPort)
 	spec.TenantSettings = azure.LateInitializeStringMap(spec.TenantSettings, az.Properties.TenantSettings)
 	spec.ShardCount = azure.LateInitializeIntPtrFromInt32Ptr(spec.ShardCount, az.Properties.ShardCount)
-	minTLS := string(az.Properties.MinimumTLSVersion)
-	spec.MinimumTLSVersion = azure.LateInitializeStringPtrFromPtr(spec.MinimumTLSVersion, &minTLS)
+	var minTLS *string
+	if az.Properties.MinimumTLSVersion != nil {
+		s := string(*az.Properties.MinimumTLSVersion)
+		minTLS = &s
+	}
+	spec.MinimumTLSVersion = azure.LateInitializeStringPtrFromPtr(spec.MinimumTLSVersion, minTLS)
+}
+
+// toCommonPropertiesRedisConfiguration converts a map[string]string to a
+// armredis.CommonPropertiesRedisConfiguration by setting the corresponding
+// fields from map values
+func toCommonPropertiesRedisConfiguration(props map[string]string) *armredis.CommonPropertiesRedisConfiguration {
+	c := &armredis.CommonPropertiesRedisConfiguration{}
+	additionalProps := make(map[string]interface{}, len(props))
+	for k, v := range props {
+		v := v
+		switch k {
+		case "aof-storage-connection-string-0":
+			c.AofStorageConnectionString0 = &v
+		case "aof-storage-connection-string-1":
+			c.AofStorageConnectionString1 = &v
+		case "maxfragmentationmemory-reserved":
+			c.MaxfragmentationmemoryReserved = &v
+		case "maxmemory-delta":
+			c.MaxmemoryDelta = &v
+		case "maxmemory-policy":
+			c.MaxmemoryPolicy = &v
+		case "maxmemory-reserved":
+			c.MaxmemoryReserved = &v
+		case "rdb-backup-enabled":
+			c.RdbBackupEnabled = &v
+		case "rdb-backup-frequency":
+			c.RdbBackupFrequency = &v
+		case "rdb-backup-max-snapshot-count":
+			c.RdbBackupMaxSnapshotCount = &v
+		case "rdb-storage-connection-string":
+			c.RdbStorageConnectionString = &v
+		case "maxclients", "preferred-data-archive-auth-method", "preferred-data-persistence-auth-method":
+			// read-only properties are ignored
+		default: // if key is not found, put it into additional props
+			additionalProps[k] = &v
+		}
+	}
+	c.AdditionalProperties = additionalProps
+	return c
+}
+
+func lateInitializeFromCommonPropertiesRedisConfiguration(p map[string]string, c *armredis.CommonPropertiesRedisConfiguration) map[string]string {
+	if p != nil || c == nil {
+		return p
+	}
+	p = make(map[string]string)
+	for k, v := range c.AdditionalProperties {
+		if s, ok := v.(string); ok {
+			p[k] = s
+			continue
+		}
+		if s, ok := v.(*string); ok {
+			p[k] = *s
+		}
+	}
+
+	if c.AofStorageConnectionString0 != nil {
+		p["aof-storage-connection-string-0"] = *c.AofStorageConnectionString0
+	}
+	if c.AofStorageConnectionString1 != nil {
+		p["aof-storage-connection-string-1"] = *c.AofStorageConnectionString1
+	}
+	if c.MaxfragmentationmemoryReserved != nil {
+		p["maxfragmentationmemory-reserved"] = *c.MaxfragmentationmemoryReserved
+	}
+	if c.MaxmemoryDelta != nil {
+		p["maxmemory-delta"] = *c.MaxmemoryDelta
+	}
+	if c.MaxmemoryPolicy != nil {
+		p["maxmemory-policy"] = *c.MaxmemoryPolicy
+	}
+	if c.MaxmemoryReserved != nil {
+		p["maxmemory-reserved"] = *c.MaxmemoryReserved
+	}
+	if c.RdbBackupEnabled != nil {
+		p["rdb-backup-enabled"] = *c.RdbBackupEnabled
+	}
+	if c.RdbBackupFrequency != nil {
+		p["rdb-backup-frequency"] = *c.RdbBackupFrequency
+	}
+	if c.RdbBackupMaxSnapshotCount != nil {
+		p["rdb-backup-max-snapshot-count"] = *c.RdbBackupMaxSnapshotCount
+	}
+	if c.RdbStorageConnectionString != nil {
+		p["rdb-storage-connection-string"] = *c.RdbStorageConnectionString
+	}
+	return p
+}
+
+func toTLSVersion(tlsVersion *string) *armredis.TLSVersion {
+	v := armredis.TLSVersion(azure.ToString(tlsVersion))
+	return &v
 }

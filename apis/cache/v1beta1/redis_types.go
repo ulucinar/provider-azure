@@ -94,6 +94,7 @@ type RedisParameters struct {
 	// +optional
 	StaticIP *string `json:"staticIp,omitempty"`
 
+	// TODO(aru): this is no longer a map but a strongly=typed struct in armredis.CommonPropertiesRedisConfiguration
 	// RedisConfiguration - All Redis Settings. Few possible keys:
 	// rdb-backup-enabled,rdb-storage-connection-string,rdb-backup-frequency
 	// maxmemory-delta,maxmemory-policy,notify-keyspace-events,maxmemory-samples,

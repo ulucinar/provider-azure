@@ -17,13 +17,9 @@ limitations under the License.
 package resourcegroup
 
 import (
-	"encoding/json"
+	"context"
 
-	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2018-05-01/resources"
-	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2018-05-01/resources/resourcesapi"
-	"github.com/Azure/go-autorest/autorest/azure/auth"
-	"github.com/pkg/errors"
-
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
 
 	"github.com/crossplane/provider-azure/apis/v1alpha3"
@@ -31,40 +27,17 @@ import (
 )
 
 // A GroupsClient handles CRUD operations for Azure Resource Group resources.
-type GroupsClient resourcesapi.GroupsClientAPI
-
-// NewClient returns a new Azure Resource Groups client. Credentials must be
-// passed as JSON encoded data.
-func NewClient(credentials []byte) (GroupsClient, error) {
-	c := azure.Credentials{}
-	if err := json.Unmarshal(credentials, &c); err != nil {
-		return nil, errors.Wrap(err, "cannot unmarshal Azure client secret data")
-	}
-	client := resources.NewGroupsClient(c.SubscriptionID)
-
-	cfg := auth.ClientCredentialsConfig{
-		ClientID:     c.ClientID,
-		ClientSecret: c.ClientSecret,
-		TenantID:     c.TenantID,
-		AADEndpoint:  c.ActiveDirectoryEndpointURL,
-		Resource:     c.ResourceManagerEndpointURL,
-	}
-	a, err := cfg.Authorizer()
-	if err != nil {
-		return nil, errors.Wrapf(err, "cannot create Azure authorizer from credentials config")
-	}
-	client.Authorizer = a
-	if err := client.AddToUserAgent(azure.UserAgent); err != nil {
-		return nil, errors.Wrap(err, "cannot add to Azure client user agent")
-	}
-
-	return client, nil
+type GroupsClient interface {
+	CreateOrUpdate(ctx context.Context, resourceGroupName string, parameters armresources.ResourceGroup, options *armresources.ResourceGroupsClientCreateOrUpdateOptions) (armresources.ResourceGroupsClientCreateOrUpdateResponse, error)
+	CheckExistence(ctx context.Context, resourceGroupName string, options *armresources.ResourceGroupsClientCheckExistenceOptions) (armresources.ResourceGroupsClientCheckExistenceResponse, error)
+	Get(ctx context.Context, resourceGroupName string, options *armresources.ResourceGroupsClientGetOptions) (armresources.ResourceGroupsClientGetResponse, error)
+	BeginDelete(ctx context.Context, resourceGroupName string, options *armresources.ResourceGroupsClientBeginDeleteOptions) (armresources.ResourceGroupsClientDeletePollerResponse, error)
 }
 
 // NewParameters returns Resource Group resource creation parameters suitable for
 // use with the Azure API.
-func NewParameters(r *v1alpha3.ResourceGroup) resources.Group {
-	return resources.Group{
+func NewParameters(r *v1alpha3.ResourceGroup) armresources.ResourceGroup {
+	return armresources.ResourceGroup{
 		Name:     azure.ToStringPtr(meta.GetExternalName(r)),
 		Location: azure.ToStringPtr(r.Spec.Location),
 	}

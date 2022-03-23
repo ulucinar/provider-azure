@@ -21,7 +21,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2018-05-01/resources"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
@@ -77,13 +77,13 @@ type connecter struct {
 }
 
 func (c *connecter) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	creds, auth, err := azure.GetAuthInfo(ctx, c.kube, mg)
+	creds, auth, err := azure.GetAuthInfo2(ctx, c.kube, mg)
 	if err != nil {
 		return nil, err
 	}
-	cl := resources.NewGroupsClient(creds[azure.CredentialsKeySubscriptionID])
-	cl.Authorizer = auth
-	return &external{client: cl}, nil
+	return &external{
+		client: armresources.NewResourceGroupsClient(creds[azure.CredentialsKeySubscriptionID], auth, nil),
+	}, nil
 }
 
 // external is a createsyncdeleter using the Azure Groups API.
@@ -97,16 +97,16 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.New(errNotResourceGroup)
 	}
 
-	res, err := e.client.CheckExistence(ctx, meta.GetExternalName(r))
+	res, err := e.client.CheckExistence(ctx, meta.GetExternalName(r), nil)
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, errCheckResourceGroup)
 	}
 
-	if res.Response.StatusCode == http.StatusNotFound {
+	if res.RawResponse.StatusCode == http.StatusNotFound {
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
-	g, err := e.client.Get(ctx, meta.GetExternalName(r))
+	g, err := e.client.Get(ctx, meta.GetExternalName(r), nil)
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, errGetResourceGroup)
 	}
@@ -125,7 +125,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	}
 
 	r.Status.SetConditions(xpv1.Creating())
-	_, err := e.client.CreateOrUpdate(ctx, meta.GetExternalName(r), resourcegroup.NewParameters(r))
+	_, err := e.client.CreateOrUpdate(ctx, meta.GetExternalName(r), resourcegroup.NewParameters(r), nil)
 	return managed.ExternalCreation{}, errors.Wrap(err, errCreateResourceGroup)
 }
 
@@ -148,6 +148,6 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	}
 
 	r.Status.SetConditions(xpv1.Deleting())
-	_, err := e.client.Delete(ctx, meta.GetExternalName(r))
+	_, err := e.client.BeginDelete(ctx, meta.GetExternalName(r), nil)
 	return errors.Wrap(err, errDeleteResourceGroup)
 }

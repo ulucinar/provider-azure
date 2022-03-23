@@ -21,8 +21,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/redis/mgmt/2018-03-01/redis"
-	"github.com/Azure/azure-sdk-for-go/services/redis/mgmt/2018-03-01/redis/redisapi"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/redis/armredis"
 	"github.com/pkg/errors"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -78,18 +77,19 @@ type connector struct {
 }
 
 func (c connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	creds, auth, err := azure.GetAuthInfo(ctx, c.kube, mg)
+	creds, auth, err := azure.GetAuthInfo2(ctx, c.kube, mg)
 	if err != nil {
 		return nil, errors.Wrap(err, errConnectFailed)
 	}
-	cl := redis.NewClient(creds[azure.CredentialsKeySubscriptionID])
-	cl.Authorizer = auth
-	return &external{kube: c.kube, client: cl}, nil
+	return &external{
+		kube:   c.kube,
+		client: armredis.NewClient(creds[azure.CredentialsKeySubscriptionID], auth, nil),
+	}, nil
 }
 
 type external struct {
 	kube   client.Client
-	client redisapi.ClientAPI
+	client redisclients.ClientAPI
 }
 
 func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
@@ -97,21 +97,21 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	if !ok {
 		return managed.ExternalObservation{}, errors.New(errNotRedis)
 	}
-	cache, err := c.client.Get(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr))
+	cache, err := c.client.Get(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr), nil)
 	if err != nil {
 		return managed.ExternalObservation{ResourceExists: false}, errors.Wrap(resource.Ignore(azure.IsNotFound, err), errGetFailed)
 	}
 
-	redisclients.LateInitialize(&cr.Spec.ForProvider, cache)
+	redisclients.LateInitialize(&cr.Spec.ForProvider, cache.ResourceInfo)
 	if err := c.kube.Update(ctx, cr); err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, errUpdateRedisCRFailed)
 	}
-	cr.Status.AtProvider = redisclients.GenerateObservation(cache)
+	cr.Status.AtProvider = redisclients.GenerateObservation(cache.ResourceInfo)
 
 	var conn managed.ConnectionDetails
 	switch cr.Status.AtProvider.ProvisioningState {
 	case redisclients.ProvisioningStateSucceeded:
-		k, err := c.client.ListKeys(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr))
+		k, err := c.client.ListKeys(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr), nil)
 		if err != nil {
 			return managed.ExternalObservation{}, errors.Wrap(err, errListAccessKeysFailed)
 		}
@@ -130,7 +130,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 	return managed.ExternalObservation{
 		ResourceExists:    true,
-		ResourceUpToDate:  !redisclients.NeedsUpdate(cr.Spec.ForProvider, cache),
+		ResourceUpToDate:  !redisclients.NeedsUpdate(cr.Spec.ForProvider, cache.ResourceInfo),
 		ConnectionDetails: conn,
 	}, nil
 }
@@ -141,7 +141,7 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		return managed.ExternalCreation{}, errors.New(errNotRedis)
 	}
 	cr.Status.SetConditions(xpv1.Creating())
-	_, err := c.client.Create(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr), redisclients.NewCreateParameters(cr))
+	_, err := c.client.BeginCreate(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr), redisclients.NewCreateParameters(cr), nil)
 	return managed.ExternalCreation{}, errors.Wrap(err, errCreateFailed)
 }
 
@@ -155,7 +155,7 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 	if cr.Status.AtProvider.ProvisioningState != redisclients.ProvisioningStateSucceeded {
 		return managed.ExternalUpdate{}, nil
 	}
-	cache, err := c.client.Get(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr))
+	cache, err := c.client.Get(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr), nil)
 	if err != nil {
 		return managed.ExternalUpdate{}, errors.Wrap(err, errGetFailed)
 	}
@@ -163,7 +163,7 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 		ctx,
 		cr.Spec.ForProvider.ResourceGroupName,
 		meta.GetExternalName(cr),
-		redisclients.NewUpdateParameters(cr.Spec.ForProvider, cache))
+		redisclients.NewUpdateParameters(cr.Spec.ForProvider, cache.ResourceInfo), nil)
 	return managed.ExternalUpdate{}, errors.Wrap(err, errUpdateFailed)
 }
 
@@ -176,6 +176,6 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
 	if cr.Status.AtProvider.ProvisioningState == redisclients.ProvisioningStateDeleting {
 		return nil
 	}
-	_, err := c.client.Delete(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr))
+	_, err := c.client.BeginDelete(ctx, cr.Spec.ForProvider.ResourceGroupName, meta.GetExternalName(cr), nil)
 	return errors.Wrap(resource.Ignore(azure.IsNotFound, err), errDeleteFailed)
 }

@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2018-05-01/resources"
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure"
@@ -83,9 +85,13 @@ const (
 	CredentialsManagementEndpointURL             = "managementEndpointUrl"
 )
 
+func GetAuthInfo(ctx context.Context, c client.Client, mg resource.Managed) (map[string]string, autorest.Authorizer, error) {
+	return nil, nil, nil
+}
+
 // GetAuthInfo figures out how to connect to Azure API and returns the necessary
 // information to be used for controllers to construct their specific clients.
-func GetAuthInfo(ctx context.Context, c client.Client, mg resource.Managed) (content map[string]string, authorizer autorest.Authorizer, err error) {
+func GetAuthInfo2(ctx context.Context, c client.Client, mg resource.Managed) (map[string]string, azcore.TokenCredential, error) {
 	switch {
 	case mg.GetProviderConfigReference() != nil:
 		return UseProviderConfig(ctx, c, mg)
@@ -98,7 +104,7 @@ func GetAuthInfo(ctx context.Context, c client.Client, mg resource.Managed) (con
 
 // UseProvider to return the necessary information to construct an Azure client.
 // Deprecated: Use UseProviderConfig
-func UseProvider(ctx context.Context, c client.Client, mg resource.Managed) (content map[string]string, authorizer autorest.Authorizer, err error) {
+func UseProvider(ctx context.Context, c client.Client, mg resource.Managed) (map[string]string, azcore.TokenCredential, error) {
 	p := &v1alpha3.Provider{}
 	if err := c.Get(ctx, types.NamespacedName{Name: mg.GetProviderReference().Name}, p); err != nil {
 		return nil, nil, errors.Wrap(err, errGetProvider)
@@ -113,17 +119,13 @@ func UseProvider(ctx context.Context, c client.Client, mg resource.Managed) (con
 	if err := json.Unmarshal(s.Data[ref.Key], &m); err != nil {
 		return nil, nil, errors.Wrap(err, errUnmarshalCredentialSecret)
 	}
-	cfg := auth.NewClientCredentialsConfig(m[CredentialsKeyClientID], m[CredentialsKeyClientSecret], m[CredentialsKeyTenantID])
-	cfg.AADEndpoint = m[CredentialsKeyActiveDirectoryEndpointURL]
-	cfg.Resource = m[CredentialsKeyResourceManagerEndpointURL]
-
-	a, err := cfg.Authorizer()
-	return m, a, errors.Wrap(err, errGetAuthorizer)
+	creds, err := testAuth(ctx, c, m)
+	return m, creds, err
 }
 
 // UseProviderConfig to return the necessary information to construct an Azure
 // client.
-func UseProviderConfig(ctx context.Context, c client.Client, mg resource.Managed) (content map[string]string, authorizer autorest.Authorizer, err error) {
+func UseProviderConfig(ctx context.Context, c client.Client, mg resource.Managed) (map[string]string, azcore.TokenCredential, error) {
 	pc := &v1beta1.ProviderConfig{}
 	t := resource.NewProviderConfigUsageTracker(c, &v1beta1.ProviderConfigUsage{})
 	if err := t.Track(ctx, mg); err != nil {
@@ -132,7 +134,31 @@ func UseProviderConfig(ctx context.Context, c client.Client, mg resource.Managed
 	if err := c.Get(ctx, types.NamespacedName{Name: mg.GetProviderConfigReference().Name}, pc); err != nil {
 		return nil, nil, errors.Wrap(err, errGetProviderConfig)
 	}
+	data, err := resource.CommonCredentialExtractor(ctx, pc.Spec.Credentials.Source, c, pc.Spec.Credentials.CommonCredentialSelectors)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "cannot get credentials")
+	}
+	m := map[string]string{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, nil, errors.Wrap(err, errUnmarshalCredentialSecret)
+	}
+	switch pc.Spec.Credentials.Source {
+	default:
+		creds, err := testAuth(ctx, c, m)
+		return m, creds, err
+	}
+}
 
+func testAuth(ctx context.Context, c client.Client, authConfig map[string]string) (azcore.TokenCredential, error) {
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get default credentials using Azure identity")
+	}
+	return cred, nil
+}
+
+// TODO(aru): remove this SP-only authentication method, or should we not use the DefaultAzureCredentials
+func spAuth(ctx context.Context, c client.Client, pc *v1beta1.ProviderConfig) (content map[string]string, authorizer autorest.Authorizer, err error) {
 	data, err := resource.CommonCredentialExtractor(ctx, pc.Spec.Credentials.Source, c, pc.Spec.Credentials.CommonCredentialSelectors)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "cannot get credentials")
@@ -144,7 +170,6 @@ func UseProviderConfig(ctx context.Context, c client.Client, mg resource.Managed
 	cfg := auth.NewClientCredentialsConfig(m[CredentialsKeyClientID], m[CredentialsKeyClientSecret], m[CredentialsKeyTenantID])
 	cfg.AADEndpoint = m[CredentialsKeyActiveDirectoryEndpointURL]
 	cfg.Resource = m[CredentialsKeyResourceManagerEndpointURL]
-
 	a, err := cfg.Authorizer()
 	return m, a, errors.Wrap(err, errGetAuthorizer)
 }
@@ -337,6 +362,17 @@ func ToStringArrayPtr(m []string) *[]string {
 	return &m
 }
 
+// ToArrayOfStringPointers converts []string to []*string
+// which is expected by some Azure API.
+func ToArrayOfStringPointers(m []string) []*string {
+	arr := make([]*string, 0, len(m))
+	for i, s := range m {
+		s := s
+		arr[i] = &s
+	}
+	return arr
+}
+
 // ToStringArray converts *[]string to []string which is expected by Azure API.
 func ToStringArray(m *[]string) []string {
 	if m == nil {
@@ -454,4 +490,16 @@ func LateInitializeStringValArrFromArrPtr(in []string, from *[]string) []string 
 		return in
 	}
 	return to.StringSlice(from)
+}
+
+func LateInitializeStringValArrFromPtrArr(in []string, from []*string) []string {
+	if in != nil || from == nil {
+		return in
+	}
+	in = make([]string, 0, len(from))
+	for i, s := range from {
+		t := *s
+		in[i] = t
+	}
+	return in
 }
